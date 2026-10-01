@@ -1,0 +1,166 @@
+#include "cache.h"
+#include <cstdlib>
+
+/*
+    Task 2B : Dynamic I-RRIP Replacement Policy (set dueling)
+    Two policies share the same 2-bit RRPV array:
+    SRRIP  : every line is inserted at RRPV 2, a hit sets RRPV to 0, and the first line with RRPV==3 is evicted.
+    I-RRIP : the Task 2A policy.  Instruction lines are inserted at 0 and data lines at 2, an instruction hit sets RRPV to 0 and a data hit to 1, and a data line with RRPV==3 is evicted before an instruction line with RRPV==3.
+
+    Leader sets : 32 of the 1024 sets always run SRRIP.  In each group of 32 consecutive sets, the set at offset g in group g is a leader (sets 0, 33, 66, ..., 1023), so the leaders are spread over all index bits.
+    Monitoring  : in the leader sets only (writebacks excluded), we count accesses (hits + fills) and misses (fills), for all lines and for instruction lines.  Non-instruction counts are total minus instruction.
+    Decision    : every EPOCH_LENGTH leader events we compute ratio = (instr accesses + instr misses) / (total accesses + total misses).  If ratio > threshold, the follower sets use I-RRIP, otherwise SRRIP.  The counters are then halved, so old behaviour fades out gradually.
+    Threshold   : DEFAULT_THRESHOLD, or the value of the environment variable IRRIP_THRESHOLD, so one binary is enough for the sensitivity study.
+*/
+
+#define maxRRPV             3   
+#define INSTR_INSERT_RRPV   0   // for instruction fills, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_INSERT_RRPV    2   // for data fills we keep the SRRIP insertion RRPV of 2
+#define INSTR_HIT_RRPV      0   // for instruction hits in I-RRIP, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_HIT_RRPV       1   // for data hits we set RRPV to 1, so a reused data line is lower than an instruction line of the same age
+
+#define NUM_LEADER_SETS     32  // number of leader sets that always run SRRIP (32 of 1024)
+#define LEADER_STRIDE       (L2C_SET/NUM_LEADER_SETS)  // stride between leader sets for each policy
+#define EPOCH_LENGTH        1024  // number of accesses in an epoch for dynamic policy selection
+#define DEFAULT_THRESHOLD   0.25  // default threshold for dynamic policy selection
+
+uint32_t l2_rrpv[L2C_SET][L2C_WAY];
+
+// leader set information for dynamic policy selection
+uint64_t ld_instr_access=0, ld_instr_miss=0;
+uint64_t ld_total_access=0, ld_total_miss=0;
+uint64_t ld_events=0;
+
+// current decision for follower sets
+bool follower_irrip = true;
+double irrip_threshold = DEFAULT_THRESHOLD;
+double last_ratio=0.0;
+
+// statistics for dynamic policy selection
+uint64_t epochs_irrip = 0, epochs_srrip = 0, mode_switches = 0;
+
+static inline bool is_leader(uint32_t set) {
+    return (set%LEADER_STRIDE== ((set/LEADER_STRIDE)%LEADER_STRIDE));
+}
+
+static inline bool is_instr_packet(uint8_t isInstruction, uint32_t type) {
+    return isInstruction && (type==LOAD || type==PREFETCH);
+}
+
+static inline bool use_irrip(uint32_t set) {
+    return !is_leader(set) && follower_irrip;
+}
+
+static void end_epoch() {
+    uint64_t num=ld_instr_access+ld_instr_miss;
+    uint64_t den=ld_total_access+ld_total_miss;
+    last_ratio = (den>0) ? ((double)num/(double)den) : 0.0;
+
+    bool new_mode= (last_ratio>irrip_threshold);
+
+    if(new_mode != follower_irrip) {
+        mode_switches++;
+        follower_irrip = new_mode;
+    }
+
+    if(follower_irrip) epochs_irrip++;
+    else epochs_srrip++;
+
+    ld_instr_access>>=1;
+    ld_instr_miss>>=1;
+    ld_total_access>>=1;
+    ld_total_miss>>=1;
+    ld_events=0;
+}
+
+void CACHE::l2c_initialize_replacement() {
+    const char *env=getenv("IRRIP_THRESHOLD");
+
+    if(env) irrip_threshold = atof(env);
+
+    cout<< NAME <<" has Dynamic I-RRIP replacement policy"
+        << " (leaders " << NUM_LEADER_SETS << ", epoch " << EPOCH_LENGTH
+        << ", threshold " << irrip_threshold << ")" << endl;
+
+    for(int i=0;i<L2C_SET;i++) 
+        for(int j=0;j<L2C_WAY;j++) 
+            l2_rrpv[i][j] = maxRRPV;
+
+}
+
+uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
+    for(int i=0; i<L2C_WAY; i++) if (!current_set[i].valid) return i;
+
+    bool irrip = use_irrip(set);
+
+    while(1) {
+        if(irrip) {
+            for (int i=0; i<L2C_WAY; i++)
+                if (l2_rrpv[set][i] == maxRRPV && !current_set[i].instruction)
+                    return i;
+        }   
+            
+        for (int i=0; i<L2C_WAY; i++)
+            if (l2_rrpv[set][i] == maxRRPV)
+                return i;
+        
+        for(int i=0; i<L2C_WAY; i++)
+            l2_rrpv[set][i]++;
+
+    }
+
+    assert(0);
+    return 0;
+}
+
+void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction) {
+    if((type==WRITEBACK) && ip) assert(0);
+
+    bool instr=is_instr_packet(isInstruction, type);
+
+    if(is_leader(set) && type!=WRITEBACK) {
+        ld_total_access++;
+        if(!hit) ld_total_miss++;
+        if(instr) { 
+            ld_instr_access++;
+            if(!hit) ld_instr_miss++;
+        }
+        if(++ld_events >= EPOCH_LENGTH) end_epoch();
+    }
+
+    if(hit) {
+        if (use_irrip(set) && !instr) l2_rrpv[set][way] = DATA_HIT_RRPV;
+        else l2_rrpv[set][way] = INSTR_HIT_RRPV;
+        return;
+    }
+
+    if(use_irrip(set) && instr) {
+        l2_rrpv[set][way] = INSTR_INSERT_RRPV;
+    } 
+    else {
+        l2_rrpv[set][way] = DATA_INSERT_RRPV;
+    }
+}
+
+static bool stats_printed = false;
+
+static void print_policy_stats() {
+    if(stats_printed) return;
+    stats_printed = true;
+
+    cout << "L2C DYN-IRRIP threshold: " << irrip_threshold
+         << "  epochs I-RRIP: " << epochs_irrip
+         << "  epochs SRRIP: " << epochs_srrip
+         << "  mode switches: " << mode_switches
+         << "  last ratio: " << last_ratio << endl;
+} 
+
+struct PolicyStatsAtExit {
+    ~PolicyStatsAtExit() {
+        print_policy_stats();
+    }
+} policy_stats_at_exit;
+
+void CACHE::l2c_replacement_final_stats() {
+    print_policy_stats();
+}
