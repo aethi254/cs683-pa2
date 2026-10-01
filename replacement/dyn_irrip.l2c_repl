@@ -20,10 +20,11 @@
 #define DATA_HIT_RRPV       1   // for data hits we set RRPV to 1, so a reused data line is lower than an instruction line of the same age
 
 #define NUM_LEADER_SETS     32  // number of leader sets that always run SRRIP (32 of 1024)
-#define LEADER_STRIDE       (L2C_SET/NUM_LEADER_SETS)  // stride between leader sets for each policy
-#define EPOCH_LENGTH        1024  // number of accesses in an epoch for dynamic policy selection
+#define LEADER_STRIDE       (L2C_SET/NUM_LEADER_SETS)  // the sets are split into groups of this many consecutive sets (32)
+#define EPOCH_LENGTH        1024  // number of leader-set events (hits + fills) between two decisions
 #define DEFAULT_THRESHOLD   0.25  // default threshold for dynamic policy selection
 
+// one 2-bit RRPV per line, shared by both policies
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
 
 // leader set information for dynamic policy selection
@@ -39,18 +40,22 @@ double last_ratio=0.0;
 // statistics for dynamic policy selection
 uint64_t epochs_irrip = 0, epochs_srrip = 0, mode_switches = 0;
 
+// a set is a leader if its offset inside its group of 32 sets equals the group number (sets 0, 33, 66, ..., 1023), so the leaders are spread over all index bits
 static inline bool is_leader(uint32_t set) {
     return (set%LEADER_STRIDE== ((set/LEADER_STRIDE)%LEADER_STRIDE));
 }
 
+// a packet is an instruction line only if it is an instruction packet and it is a load or prefetch.  All other packets are considered data packets.
 static inline bool is_instr_packet(uint8_t isInstruction, uint32_t type) {
     return isInstruction && (type==LOAD || type==PREFETCH);
 }
 
+// leader sets always run SRRIP; follower sets run I-RRIP only while the current decision says so
 static inline bool use_irrip(uint32_t set) {
     return !is_leader(set) && follower_irrip;
 }
 
+// at the end of an epoch we compute ratio = (instr accesses + instr misses) / (total accesses + total misses) and pick I-RRIP for the followers if it is above the threshold, SRRIP otherwise
 static void end_epoch() {
     uint64_t num=ld_instr_access+ld_instr_miss;
     uint64_t den=ld_total_access+ld_total_miss;
@@ -66,6 +71,7 @@ static void end_epoch() {
     if(follower_irrip) epochs_irrip++;
     else epochs_srrip++;
 
+    // halve all counters so that old behaviour fades out gradually and one noisy epoch cannot flip the mode on its own
     ld_instr_access>>=1;
     ld_instr_miss>>=1;
     ld_total_access>>=1;
@@ -73,6 +79,7 @@ static void end_epoch() {
     ld_events=0;
 }
 
+// to initialize, we read the threshold from the environment variable IRRIP_THRESHOLD (default 0.25) and set all RRPVs to maxRRPV (3)
 void CACHE::l2c_initialize_replacement() {
     const char *env=getenv("IRRIP_THRESHOLD");
 
@@ -88,11 +95,13 @@ void CACHE::l2c_initialize_replacement() {
 
 }
 
+// to find a victim, we first look for an invalid line.  If there is none, we look for a line with RRPV==maxRRPV (3), preferring a data line in I-RRIP mode.  If there is no such line, we increment all RRPVs and repeat until we find a victim.
 uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
     for(int i=0; i<L2C_WAY; i++) if (!current_set[i].valid) return i;
 
     bool irrip = use_irrip(set);
 
+    // in I-RRIP mode we first look for a data line with RRPV==maxRRPV (3); in SRRIP mode we skip this step
     while(1) {
         if(irrip) {
             for (int i=0; i<L2C_WAY; i++)
@@ -100,24 +109,29 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                     return i;
         }   
             
+        // otherwise (or in SRRIP mode) we evict the first line with RRPV==maxRRPV (3)
         for (int i=0; i<L2C_WAY; i++)
             if (l2_rrpv[set][i] == maxRRPV)
                 return i;
         
+        // if there is no such line, we increment all RRPVs and repeat the process
         for(int i=0; i<L2C_WAY; i++)
             l2_rrpv[set][i]++;
 
     }
 
+    // we should never reach here, but if we do, we assert(0) to indicate an error
     assert(0);
     return 0;
 }
 
+// called on every hit and fill.  Leader sets update the monitors first, then the line's RRPV is set according to the policy this set is currently running.
 void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction) {
     if((type==WRITEBACK) && ip) assert(0);
 
     bool instr=is_instr_packet(isInstruction, type);
 
+    // training: only leader sets, and only demand/prefetch traffic (writebacks are not something the core waits for)
     if(is_leader(set) && type!=WRITEBACK) {
         ld_total_access++;
         if(!hit) ld_total_miss++;
@@ -128,12 +142,14 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
         if(++ld_events >= EPOCH_LENGTH) end_epoch();
     }
 
+    // promotion: SRRIP sends every hit to 0, I-RRIP sends data hits only to 1
     if(hit) {
         if (use_irrip(set) && !instr) l2_rrpv[set][way] = DATA_HIT_RRPV;
         else l2_rrpv[set][way] = INSTR_HIT_RRPV;
         return;
     }
 
+    // insertion: in I-RRIP mode instruction fills go to 0, everything else goes to 2 (the SRRIP insertion)
     if(use_irrip(set) && instr) {
         l2_rrpv[set][way] = INSTR_INSERT_RRPV;
     } 
@@ -142,6 +158,7 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     }
 }
 
+// to print the statistics at the end of simulation, we print the threshold, the number of epochs spent in each mode, the number of mode switches and the last ratio.  We only print them once.
 static bool stats_printed = false;
 
 static void print_policy_stats() {
@@ -161,6 +178,7 @@ struct PolicyStatsAtExit {
     }
 } policy_stats_at_exit;
 
+// for printing out our own stats at the end
 void CACHE::l2c_replacement_final_stats() {
     print_policy_stats();
 }

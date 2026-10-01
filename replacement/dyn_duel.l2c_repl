@@ -1,0 +1,211 @@
+#include "cache.h"
+#include <cstdlib>
+
+/*
+    Task 2B (improved design) : Dynamic I-RRIP with true set dueling
+    Two policies share the same 2-bit RRPV array:
+    SRRIP  : every line is inserted at RRPV 2, a hit sets RRPV to 0, and the first line with RRPV==3 is evicted.
+    I-RRIP : the Task 2A policy.  Instruction lines are inserted at 0 and data lines at 2, an instruction hit sets RRPV to 0 and a data hit to 1, and a data line with RRPV==3 is evicted before an instruction line with RRPV==3.
+
+    Leader sets : the 1024 sets are split into 32 groups of 32.  In group g, offset g is an SRRIP leader and offset 31-g is an I-RRIP leader.  g and 31-g are never equal, so the two groups never overlap.  The other 960 sets are followers.
+    Monitoring  : every leader set counts its instruction and data accesses and misses (writebacks excluded).  They are printed at the end of the run.
+    Decision    : PSEL is a 10-bit saturating counter starting at 512.  A miss in an SRRIP leader adds its cost to PSEL, a miss in an I-RRIP leader subtracts it.  Followers use I-RRIP while PSEL >= 512 (the SRRIP leaders are missing more), and SRRIP otherwise.
+    Miss cost   : a data miss costs 1 and an instruction miss costs instr_weight (W), because an instruction miss stalls the front end while part of a data miss is hidden by the out-of-order core.
+    W           : DEFAULT_INSTR_WEIGHT, or the value of the environment variable IRRIP_INSTR_WEIGHT, so one binary is enough for the sensitivity study.
+*/
+
+#define maxRRPV             3   
+#define INSTR_INSERT_RRPV   0   // for instruction fills, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_INSERT_RRPV    2   // for data fills we keep the SRRIP insertion RRPV of 2
+#define INSTR_HIT_RRPV      0   // for instruction hits in I-RRIP, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_HIT_RRPV       1   // for data hits we set RRPV to 1, so a reused data line is lower than an instruction line of the same age
+
+#define NUM_LEADER_SETS         32                          // leader sets per policy (32 SRRIP + 32 I-RRIP)
+#define LEADER_STRIDE           (L2C_SET/NUM_LEADER_SETS)   // the sets are split into groups of this many consecutive sets (32)
+#define PSEL_BITS               10                          // width of the policy selection counter
+#define PSEL_MAX                ((1<<PSEL_BITS)-1)          // 1023
+#define PSEL_MID                (1<<(PSEL_BITS-1))          // 512, PSEL starts here
+#define DEFAULT_INSTR_WEIGHT    2                           // default cost W of an instruction miss (a data miss costs 1)
+
+// one 2-bit RRPV per line, shared by both policies
+uint32_t l2_rrpv[L2C_SET][L2C_WAY];
+
+int32_t psel = PSEL_MID;  // policy selection counter for dynamic policy selection
+uint32_t instr_weight = DEFAULT_INSTR_WEIGHT;  // weight for instruction accesses in dynamic policy selection
+
+// per-group monitors (index 0 = SRRIP leaders, 1 = I-RRIP leaders)
+uint64_t grp_instr_access[2] = {0, 0};
+uint64_t grp_instr_miss[2] = {0, 0};
+uint64_t grp_data_access[2] = {0, 0};
+uint64_t grp_data_miss[2] = {0, 0};
+
+// statistics for dynamic policy selection
+uint64_t follower_fills_irrip=0, follower_fills_srrip=0;
+uint64_t mode_switches=0;
+bool last_mode_irrip = true;  // last mode used by follower sets
+
+// in group g (32 consecutive sets), offset g is an SRRIP leader (sets 0, 33, 66, ..., 1023)
+static inline bool is_srrip_leader(uint32_t set) {
+    return (set%LEADER_STRIDE==(set/LEADER_STRIDE)%LEADER_STRIDE);
+}
+
+// in group g, offset 31-g is an I-RRIP leader; g and 31-g are never equal, so the two groups never overlap
+static inline bool is_irrip_leader(uint32_t set) {
+    return (set % LEADER_STRIDE) == (LEADER_STRIDE - 1 - (set / LEADER_STRIDE) % LEADER_STRIDE);
+}
+
+// a packet is an instruction line only if it is an instruction packet and it is a load or prefetch.  All other packets are considered data packets.
+static inline bool is_instr_packet(uint8_t isInstruction, uint32_t type) {
+    return isInstruction && (type==LOAD || type==PREFETCH);
+}
+
+// followers use I-RRIP while PSEL is in the upper half, i.e. while the SRRIP leaders are missing more
+static inline bool follower_uses_irrip() {
+    return psel >= PSEL_MID;
+}
+
+// leaders always run their own policy; followers run whichever policy PSEL currently selects
+static inline bool use_irrip(uint32_t set) {
+    if(is_srrip_leader(set)) return false;
+    if(is_irrip_leader(set)) return true;
+    return follower_uses_irrip();
+}
+
+// to initialize, we read the instruction-miss weight W from the environment variable IRRIP_INSTR_WEIGHT (default 2) and set all RRPVs to maxRRPV (3)
+void CACHE::l2c_initialize_replacement() {
+
+    const char *env=getenv("IRRIP_INSTR_WEIGHT");
+    if(env) instr_weight = atoi(env);
+
+    cout << NAME << " has Dynamic I-RRIP (set dueling) replacement policy"
+    << " (leaders " << NUM_LEADER_SETS << "+" << NUM_LEADER_SETS
+    << ", PSEL " << PSEL_BITS << " bits, instr miss weight " << instr_weight << ")" << endl;
+
+    for(int i=0;i<L2C_SET;i++) {
+        for(int j=0;j<L2C_WAY;j++) {
+            l2_rrpv[i][j] = maxRRPV;
+        }
+    }
+}
+
+// to find a victim, we first look for an invalid line.  If there is none, we look for a line with RRPV==maxRRPV (3), preferring a data line in I-RRIP mode.  If there is no such line, we increment all RRPVs and repeat until we find a victim.
+uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
+    for (int i=0; i<L2C_WAY; i++)
+        if (!current_set[i].valid)
+            return i;
+    
+    bool irrip = use_irrip(set);
+
+    // in I-RRIP mode we first look for a data line with RRPV==maxRRPV (3); in SRRIP mode we skip this step
+    while(1) {
+        if(irrip) {
+            for (int i=0; i<L2C_WAY; i++)
+                if (l2_rrpv[set][i] == maxRRPV && !current_set[i].instruction)
+                    return i;
+        }
+
+        // otherwise (or in SRRIP mode) we evict the first line with RRPV==maxRRPV (3)
+        for (int i=0; i<L2C_WAY; i++)
+            if (l2_rrpv[set][i] == maxRRPV)
+                return i;
+        
+        // if there is no such line, we increment all RRPVs and repeat the process
+        for (int i=0; i<L2C_WAY; i++)
+            l2_rrpv[set][i]++;
+    }
+
+    // we should never reach here, but if we do, we assert(0) to indicate an error
+    assert(0);
+    return 0;
+}
+
+// called on every hit and fill.  Leader sets update their monitors and PSEL first, then the line's RRPV is set according to the policy this set is currently running.
+void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction) {
+    if(type==WRITEBACK && ip) assert(0);
+
+    bool instr = is_instr_packet(isInstruction, type);
+
+    // grp is 0 for an SRRIP leader, 1 for an I-RRIP leader and -1 for a follower
+    int grp = is_srrip_leader(set) ? 0 : (is_irrip_leader(set) ? 1 : -1);
+    // training: only leader sets, and only demand/prefetch traffic (writebacks are not something the core waits for)
+    if(grp>=0 && type!=WRITEBACK) {
+        if(instr) {
+            grp_instr_access[grp]++;
+            if(!hit) grp_instr_miss[grp]++;
+        } else {
+            grp_data_access[grp]++;
+            if(!hit) grp_data_miss[grp]++;
+        }
+
+        // every leader miss moves PSEL: an instruction miss costs W, a data miss costs 1
+        if(!hit) {
+            int32_t cost = instr ? (int32_t)instr_weight : 1;
+            if (grp == 0) psel += cost; // SRRIP leader missed -> increase PSEL (favor I-RRIP)
+            else psel-=cost;  // I-RRIP leader missed -> decrease PSEL (favor SRRIP)
+            // saturate PSEL to its 10-bit range
+            if(psel>PSEL_MAX) psel=PSEL_MAX;
+            if(psel<0) psel=0;
+
+            // count how often the followers' mode changes, for the statistics
+            bool mode=follower_uses_irrip();
+            if(mode!=last_mode_irrip) {
+                mode_switches++;
+                last_mode_irrip=mode;
+            }
+        }
+    }
+
+    // count follower fills in each mode, for the statistics
+    bool irrip = use_irrip(set);
+    if(grp<0 && !hit) {
+        if(irrip) follower_fills_irrip++;
+        else follower_fills_srrip++;
+    }
+
+    // promotion: SRRIP sends every hit to 0, I-RRIP sends data hits only to 1
+    if(hit) {
+        if(irrip && !instr) l2_rrpv[set][way] = DATA_HIT_RRPV;
+        else l2_rrpv[set][way] = INSTR_HIT_RRPV;
+        return;
+    }
+
+    // insertion: in I-RRIP mode instruction fills go to 0, everything else goes to 2 (the SRRIP insertion)
+    if(irrip && instr) {
+        l2_rrpv[set][way] = INSTR_INSERT_RRPV;
+    } 
+    else {
+        l2_rrpv[set][way] = DATA_INSERT_RRPV;
+    }
+
+}
+
+// to print the statistics at the end of simulation, we print W, the share of follower fills in I-RRIP mode, the mode switches, the final PSEL and the leader-set counters.  We only print them once.
+static bool stats_printed = false;
+
+static void print_policy_stats() {
+    if(stats_printed) return;
+    stats_printed = true;
+
+    uint64_t f = follower_fills_irrip + follower_fills_srrip;
+
+    cout << "L2C DUEL instr weight: " << instr_weight
+    << "  follower fills in I-RRIP mode: " << (f ? 100.0 * follower_fills_irrip / f : 0.0) << "%"
+    << "  mode switches: " << mode_switches
+    << "  final PSEL: " << psel << endl;
+
+    cout << "L2C DUEL SRRIP leaders  instr acc/miss: " << grp_instr_access[0] << "/" << grp_instr_miss[0]
+    << "  data acc/miss: " << grp_data_access[0] << "/" << grp_data_miss[0] << endl;
+    cout << "L2C DUEL I-RRIP leaders instr acc/miss: " << grp_instr_access[1] << "/" << grp_instr_miss[1]
+    << "  data acc/miss: " << grp_data_access[1] << "/" << grp_data_miss[1] << endl;
+}
+
+struct PolicyStatsAtExit {
+    ~PolicyStatsAtExit() {
+        print_policy_stats();
+    }
+} policy_stats_at_exit;
+
+// for printing out our own stats at the end
+void CACHE::l2c_replacement_final_stats() {
+    print_policy_stats();
+}
