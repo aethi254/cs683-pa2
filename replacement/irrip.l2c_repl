@@ -1,20 +1,39 @@
 #include "cache.h"
 
-#define maxRRPV             3
-#define INSTR_INSERT_RRPV   0
-#define DATA_INSERT_RRPV    2
-#define INSTR_HIT_RRPV      0
-#define DATA_HIT_RRPV       1
+/*
+    Task 2A : I-RRIP Replacement Policy
+    Each L2C line has a 2-bit RRPV.
+    0 -> recently used
+    1 -> not recently used
+    2 -> not recently used
+    3 -> not recently used (candidate for eviction)
+
+    Insertion : instruction lines are given a higher priority than data lines, so we set the RRPV to 0 for instruction fills and 2 for data fills.  This gives instruction lines a higher priority than data lines, so that they are less likely to be evicted.
+    Promotion : on a hit, we set the RRPV to 0 for instruction hits and 1 for data hits.  This gives instruction lines a higher priority than data lines, so that they are less likely to be evicted.
+    Eviction : we first look for an invalid line.  If there is no invalid line, we look for a line with RRPV==3 and is a data line.  If there is no such line, we look for a line with RRPV==3 and is an instruction line.  If there is no such line, we increment all RRPVs and repeat the process until we find a victim.
+*/
+
+#define maxRRPV             3   
+#define INSTR_INSERT_RRPV   0   // for instruction fills, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_INSERT_RRPV    2   // for data fills, we set RRPV to 2 instead of 0 to give a chance for instruction lines to be evicted first
+#define INSTR_HIT_RRPV      0   // for instruction hits in I-RRIP, we set RRPV to 0 to give them a higher priority than data lines
+#define DATA_HIT_RRPV       1   // for data hits in I-RRIP, we set RRPV to 1 instead of 0 to give a chance for instruction lines to be evicted first
 
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
 
+
+// for statistics printed at the end of simulation
 uint64_t irrip_instr_fills=0, irrip_data_fills=0;
 uint64_t irrip_instr_evicted=0, irrip_data_evicted=0;
 
+
+// a packet is an instruction line only if it is an instruction packet and it is a load or prefetch.  All other packets are considered data packets.
 static inline bool is_instr_packet(uint8_t isInstruction, uint32_t type) {
     return isInstruction && (type==LOAD || type==PREFETCH);
 }
 
+
+// to initialize the replacement state of the cache, we set all RRPVs to maxRRPV (3) so that they are all candidates for eviction
 void CACHE::l2c_initialize_replacement() {
     cout<< NAME <<" has I-RRIP replacement policy"
     << " (instr insert RRPV " << INSTR_INSERT_RRPV << ", data insert RRPV " << DATA_INSERT_RRPV << ")"<<endl;
@@ -26,11 +45,14 @@ void CACHE::l2c_initialize_replacement() {
     }
 }
 
+
+// to find a victim, we first look for an invalid line.  If there is no invalid line, we look for a line with RRPV==maxRRPV (3).  If there is no such line, we increment all RRPVs and repeat the process until we find a victim.
 uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
     
     for (int i=0; i<L2C_WAY; i++) if (!current_set[i].valid) return i;
 
     while(1) {
+        // first look for a line with RRPV==maxRRPV (3) and is an invalid instruction line
         for(int i=0;i<L2C_WAY;i++) {
             if(l2_rrpv[set][i]==maxRRPV && !current_set[i].instruction) {
                 irrip_data_evicted++;
@@ -38,6 +60,7 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
             }
         }
 
+        // if there is no such line, we look for a line with RRPV==maxRRPV (3) and is an instruction line
         for(int i=0;i<L2C_WAY;i++) {
             if(l2_rrpv[set][i]==maxRRPV) {
                 irrip_instr_evicted++;
@@ -45,33 +68,44 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
             }
         }
 
+        // if there is no such line, we increment all RRPVs and repeat the process
         for(int i=0;i<L2C_WAY;i++) {
             l2_rrpv[set][i]++;
         }
     }
 
+    // we should never reach here, but if we do, we assert(0) to indicate an error
     assert(0);
     return 0;
 }
 
+
+// to update the replacement state, we set the RRPV of the line to 0 for instruction hits and 1 for data hits.  For fills, we set the RRPV to 0 for instruction fills and 2 for data fills.
+// called on every hit and fill, but not on evictions.  We also keep track of the number of instruction and data fills for statistics.
 void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction) {
     if((type==WRITEBACK) && ip) assert(0);
 
     bool instr=is_instr_packet(isInstruction, type);
 
+    // promote the RRPV of the line to 0 for instruction hits and 1 for data hits.  For fills, we set the RRPV to 0 for instruction fills and 2 for data fills.
     if(hit) {
         l2_rrpv[set][way]=instr?INSTR_HIT_RRPV:DATA_HIT_RRPV;
         return;
     }
+
+    // instruction lines are given a higher priority than data lines, so we set the RRPV to 0 for instruction fills and 2 for data fills. 
     if(instr) {
         l2_rrpv[set][way]=INSTR_INSERT_RRPV;
         irrip_instr_fills++;
-    } else {
+    } 
+    else {
         l2_rrpv[set][way]=DATA_INSERT_RRPV;
         irrip_data_fills++;
     }
 }
 
+
+// to print the statistics at the end of simulation, we print the number of instruction and data fills and evictions.  We only print the statistics once, even if this function is called multiple times.
 static bool stats_printed=false;
 
 static void print_policy_stats() {
@@ -88,6 +122,8 @@ struct PolicyStatsAtExit {
     }
 } policy_stats_at_exit;
 
+
+// for printing out our own stats at the end
 void CACHE::l2c_replacement_final_stats() {
     print_policy_stats();
 }
