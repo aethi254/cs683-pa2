@@ -1,0 +1,49 @@
+[start] lru Trace1
+[start] rrip Trace1
+[start] irrip Trace1
+[start] dyn_t0.25 Trace1
+[start] dyn_t0.45 Trace1
+[start] dyn_t0.40 Trace1
+[start] dyn_t0.50 Trace1
+[start] dyn_t0.60 Trace1
+[done ] rrip Trace1
+[start] lru Trace2
+[done ] lru Trace1
+[start] rrip Trace2
+[done ] dyn_t0.45 Trace1
+[start] irrip Trace2
+[done ] dyn_t0.50 Trace1
+[start] dyn_t0.25 Trace2
+[done ] dyn_t0.40 Trace1
+[start] dyn_t0.40 Trace2
+[done ] irrip Trace1
+[start] dyn_t0.45 Trace2
+[done ] dyn_t0.25 Trace1
+[start] dyn_t0.50 Trace2
+[done ] dyn_t0.60 Trace1
+[start] dyn_t0.60 Trace2
+[done ] rrip Trace2
+[start] lru Trace3
+[done ] lru Trace2
+[start] rrip Trace3
+[done ] dyn_t0.25 Trace2
+[start] irrip Trace3
+[done ] dyn_t0.40 Trace2
+[start] dyn_t0.25 Trace3
+[done ] dyn_t0.60 Trace2
+[start] dyn_t0.40 Trace3
+[done ] irrip Trace2
+[start] dyn_t0.45 Trace3
+[done ] dyn_t0.45 Trace2
+[start] dyn_t0.50 Trace3
+[done ] dyn_t0.50 Trace2
+[start] dyn_t0.60 Trace3
+[done ] rrip Trace3
+[done ] lru Trace3
+[done ] irrip Trace3
+[done ] dyn_t0.25 Trace3
+[done ] dyn_t0.40 Trace3
+[done ] dyn_t0.50 Trace3
+[done ] dyn_t0.60 Trace3
+[done ] dyn_t0.45 Trace3
+All Task 2 runs finished -> results/task2
