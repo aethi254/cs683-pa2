@@ -1,0 +1,99 @@
+#include "cache.h"
+
+#define maxRRPV             3
+#define INSTR_INSERT_RRPV   0
+#define DATA_INSERT_RRPV    2
+#define INSTR_HIT_RRPV      0
+#define DATA_HIT_RRPV       1
+
+uint32_t l2_rrpv[L2C_SET][L2C_WAY];
+
+uint64_t irrip_instr_fills=0, irrip_data_fills=0;
+uint64_t irrip_instr_evicted=0, irrip_data_evicted=0;
+
+static inline bool is_instr_packet(uint8_t isInstruction, uint32_t type) {
+    return isInstruction && (type==LOAD || type==PREFETCH);
+}
+
+void CACHE::l2c_initialize_replacement() {
+    cout<< NAME <<" has I-RRIP replacement policy"
+    << " (instr insert RRPV " << INSTR_INSERT_RRPV << ", data insert RRPV " << DATA_INSERT_RRPV << ")"<<endl;
+
+    for(int i=0;i<L2C_SET;i++) {
+        for(int j=0;j<L2C_WAY;j++) {
+            l2_rrpv[i][j] = maxRRPV;
+        }
+    }
+}
+
+uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
+    
+    for (int i=0; i<L2C_WAY; i++) if (!current_set[i].valid) return i;
+
+    while(1) {
+        for(int i=0;i<L2C_WAY;i++) {
+            if(l2_rrpv[set][i]==maxRRPV && !current_set[i].instruction) {
+                irrip_data_evicted++;
+                return i;
+            }
+        }
+
+        for(int i=0;i<L2C_WAY;i++) {
+            if(l2_rrpv[set][i]==maxRRPV) {
+                irrip_instr_evicted++;
+                return i;
+            }
+        }
+
+        for(int i=0;i<L2C_WAY;i++) {
+            l2_rrpv[set][i]++;
+        }
+    }
+
+    assert(0);
+    return 0;
+}
+
+void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction) {
+    if((type==WRITEBACK) && ip) assert(0);
+
+    bool instr=is_instr_packet(isInstruction, type);
+
+    if(hit) {
+        l2_rrpv[set][way]=instr?INSTR_HIT_RRPV:DATA_HIT_RRPV;
+        return;
+    }
+    if(instr) {
+        l2_rrpv[set][way]=INSTR_INSERT_RRPV;
+        irrip_instr_fills++;
+    } else {
+        l2_rrpv[set][way]=DATA_INSERT_RRPV;
+        irrip_data_fills++;
+    }
+}
+
+static bool stats_printed=false;
+
+static void print_policy_stats() {
+    if(stats_printed) return;
+
+    stats_printed=true;
+    cout << "L2C I-RRIP instruction fills: " << irrip_instr_fills << "  data fills: " << irrip_data_fills << endl;
+    cout << "L2C I-RRIP instruction lines evicted: " << irrip_instr_evicted << "  data lines evicted: " << irrip_data_evicted << endl;
+}
+
+struct PolicyStatsAtExit {
+    ~PolicyStatsAtExit() {
+        print_policy_stats();
+    }
+} policy_stats_at_exit;
+
+void CACHE::l2c_replacement_final_stats() {
+    print_policy_stats();
+}
+
+
+
+
+
+
