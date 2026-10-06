@@ -1,5 +1,45 @@
 #include "cache.h"
 
+#define TABLE_SIZE 64 // no of IPs to track
+#define PATTERN_SIZE 256 // one slot per possible 8 bit sig
+#define FILTER_SIZE 256 
+#define MAX_STRIDE 63 // since 4 kb page means 64 lines
+#define MAX_CONF 3 // confidence counters are 2 bits
+#define UNIFORM_CONF 3
+#define PATTERN_CONF 2
+#define EPOCH 256 // to re-check the accuracy after every 256 prefetches
+
+struct IpEntry
+{
+    bool valid;
+    uint8_t tag;
+    uint16_t lastLine;
+    int8_t lastStride;
+    uint8_t conf; // goes up when the stride repeats, down when it changes
+    uint8_t sig;
+};
+
+struct PatternEntry
+{
+    int8_t stride; // stride that we expect next
+    uint8_t conf; // sureness
+};
+
+// Remembers lines we prefetched so we can tell later if they actually got used
+struct FilterEntry
+{
+    bool valid;
+    uint8_t tag;
+};
+
+static IpEntry ipTable[TABLE_SIZE];
+static PatternEntry patternTable[PATTERN_SIZE];
+static FilterEntry prefetchFilter[FILTER_SIZE];
+static uint32_t issued = 0;
+static uint32_t useful = 0;
+static int degree = 4; // start degree, later the throttle will move it
+static uint64_t totalIssued = 0;
+static uint64_t totalUseful = 0;
 
 void CACHE::l1d_prefetcher_initialize() 
 {
@@ -10,15 +50,197 @@ void CACHE::l1d_prefetcher_initialize()
 
 void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint8_t critical_ip_flag)
 {
-   
+   if (type == PREFETCH)
+   {
+        return;
+   }
+   uint64_t line = addr >> LOG2_BLOCK_SIZE;
+   uint64_t page = addr >> LOG2_PAGE_SIZE;
+
+   // The program used a line that we prefetched, so that prefetch was used so we clear it so that it doesnt get counted twice
+   FilterEntry &hit = prefetchFilter[line%FILTER_SIZE];
+   if (hit.valid && hit.tag == (uint8_t)(line/FILTER_SIZE))
+   {
+        useful++;
+        totalUseful++;
+        hit.valid = false;
+   }
+
+   // to find the IpEntry of this ip
+   IpEntry &e = ipTable[(ip ^ (ip >> 6)) % TABLE_SIZE];
+   uint8_t tag = (uint8_t)(ip >> 6);
+
+   // if new IP
+   if (!e.valid || e.tag != tag)
+   {
+        e.valid = true;
+        e.tag = tag;
+        e.lastStride = 0;
+        e.lastLine = line;
+        e.conf = 0;
+        e.sig = 0;
+        return;
+   }
+
+   int stride = (int16_t)((uint16_t)line - e.lastLine);
+   if (stride == 0)
+   {
+        return; // nothing new to learn since same line
+   }
+
+   if (stride > MAX_STRIDE || stride < -MAX_STRIDE)
+   {
+        e.lastLine = line;
+        e.lastStride = 0;
+        e.conf = 0;
+        e.sig = 0;
+        return;
+   }
+
+   // if same stride is observed, we increase the conf 
+   if (stride == e.lastStride)
+   {
+        if (e.conf < MAX_CONF)
+        {
+            e.conf++;
+        }    
+   }
+   else if (e.conf > 0)
+   {
+        e.conf--;
+   }
+
+   // Non uniform side. We will teach the pattern table that the old signature was followed by this stride. If it was a right guess we will inc conf else dec.
+   PatternEntry &learn = patternTable[e.sig];
+   if (learn.conf == 0)
+   {
+        learn.stride = stride;
+        learn.conf = 1;
+   }
+   else if (learn.stride == stride)
+   {
+        if (learn.conf < MAX_CONF)
+        {
+            learn.conf++;
+        }
+   }
+   else
+   {
+    learn.conf--;
+   }
+
+   // Now, we will push this stride into the signature. Old history moves left by 2 bits and the new stride is XORed.
+   e.sig = (e.sig << 2) ^ (stride & 0x7F);
+   e.lastStride = stride;
+   e.lastLine = line; 
+
+   if (e.conf >= UNIFORM_CONF)
+   {
+        // this is the uniform stride case 
+        for (int i = 1; i <= degree; i++)
+        {
+            uint64_t pfLine = line + stride * i;
+            if ((pfLine << LOG2_BLOCK_SIZE) >> LOG2_PAGE_SIZE != page)
+            {
+                break; // would leave the page, so stop here
+            }
+            FilterEntry &f = prefetchFilter[pfLine % FILTER_SIZE];
+            if (f.valid && f.tag == (uint8_t)(pfLine / FILTER_SIZE))
+            {
+                continue; // skip the lines we have already prefetched but havent used
+            }
+
+            // same as IP-stride
+            if (MSHR.occupancy < (MSHR.SIZE >> 1))
+                prefetch_line(ip, addr, pfLine << LOG2_BLOCK_SIZE, FILL_L1, 0);
+            else
+                prefetch_line(ip, addr, pfLine << LOG2_BLOCK_SIZE, FILL_L2, 0);
+        }
+   } 
+   else
+   {
+        // non-uniform case
+        uint8_t sig = e.sig;
+        uint64_t pfLine = line;
+        for (int i = 1; i <= degree; i++)
+        {
+            PatternEntry &p = patternTable[sig];
+            if (p.conf < PATTERN_CONF)
+            {
+                break; // not sure what will come next
+            }
+
+            pfLine += p.stride;
+            if ((pfLine << LOG2_BLOCK_SIZE) >> LOG2_PAGE_SIZE != page)
+            {
+                break; // same page rule as above
+            }
+
+            sig = (sig << 2) ^ (p.stride & 0x7F);
+
+            FilterEntry &f = prefetchFilter[pfLine % FILTER_SIZE];
+            if (f.valid && f.tag == (uint8_t)(pfLine / FILTER_SIZE))
+            {
+                continue;
+            }
+
+            if (MSHR.occupancy < (MSHR.SIZE >> 1))
+                prefetch_line(ip, addr, pfLine << LOG2_BLOCK_SIZE, FILL_L1, 0);
+            else
+                prefetch_line(ip, addr, pfLine << LOG2_BLOCK_SIZE, FILL_L2, 0);
+        }
+   }
+
+   // accuracy-based throttling
+   if (issued >= EPOCH)
+   {
+       int accuracy = useful * 100 / issued;
+       if (accuracy >= 75)
+       {
+            degree = 6;
+       } 
+       else if (accuracy >= 50)
+       {
+            degree = 4;
+       }
+       else if (accuracy >= 25)
+       {
+            degree = 2;
+       }
+       else
+       {
+            degree = 1;
+       }
+
+       issued = 0;
+       useful = 0;
+   } 
 }
 
 void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t v_evicted_addr, uint64_t evicted_addr, uint32_t metadata_in)
 {
+    uint64_t evictedLine = evicted_addr >> LOG2_BLOCK_SIZE;
+    FilterEntry &old = prefetchFilter[evictedLine % FILTER_SIZE];
+    if (old.valid && old.tag == (uint8_t)(evictedLine / FILTER_SIZE))
+    {
+        old.valid = false;
+    }
+
+    if (prefetch)
+    {
+        uint64_t line = addr >> LOG2_BLOCK_SIZE;
+        prefetchFilter[line % FILTER_SIZE].valid = true;
+        prefetchFilter[line % FILTER_SIZE].tag = (uint8_t)(line / FILTER_SIZE);
+        issued++;
+        totalIssued++;
+    }
+
 	return; //metadata_in;
 }
 
 void CACHE::l1d_prefetcher_final_stats()
 {
-
+    std::cout << "SPP issued: " << totalIssued << std::endl;
+    std::cout << "useful: " << totalUseful << std::endl;
+    std::cout << "SPP final degree: " << degree << std::endl;
 }
