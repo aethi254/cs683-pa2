@@ -1,0 +1,104 @@
+51 runs, 8 at a time, warmup 25000000, sim 25000000
+[start] lru Trace1
+[start] rrip Trace1
+[start] irrip Trace1
+[start] irrip_insonly Trace1
+[start] irrip_evictonly Trace1
+[start] irrip_hit0 Trace1
+[start] irrip_hit0_ins1 Trace1
+[start] dyn_t0.25 Trace1
+[done ] lru Trace1
+[start] dyn_t0.40 Trace1
+[done ] rrip Trace1
+[start] dyn_t0.45 Trace1
+[done ] irrip_hit0 Trace1
+[start] dyn_t0.50 Trace1
+[done ] dyn_t0.25 Trace1
+[start] dyn_t0.60 Trace1
+[done ] irrip_evictonly Trace1
+[start] duel_w1 Trace1
+[done ] irrip_hit0_ins1 Trace1
+[start] duel_w2 Trace1
+[done ] irrip_insonly Trace1
+[start] duel_w4 Trace1
+[done ] irrip Trace1
+[start] duel_w8 Trace1
+[done ] dyn_t0.40 Trace1
+[start] duel_w16 Trace1
+[done ] dyn_t0.45 Trace1
+[start] lru Trace2
+[done ] dyn_t0.60 Trace1
+[start] rrip Trace2
+[done ] dyn_t0.50 Trace1
+[start] irrip Trace2
+[done ] duel_w2 Trace1
+[start] irrip_insonly Trace2
+[done ] duel_w1 Trace1
+[start] irrip_evictonly Trace2
+[done ] duel_w4 Trace1
+[start] irrip_hit0 Trace2
+[done ] duel_w8 Trace1
+[start] irrip_hit0_ins1 Trace2
+[done ] lru Trace2
+[start] dyn_t0.25 Trace2
+[done ] duel_w16 Trace1
+[start] dyn_t0.40 Trace2
+[done ] rrip Trace2
+[start] dyn_t0.45 Trace2
+[done ] irrip_hit0 Trace2
+[start] dyn_t0.50 Trace2
+[done ] irrip Trace2
+[start] dyn_t0.60 Trace2
+[done ] irrip_evictonly Trace2
+[start] duel_w1 Trace2
+[done ] irrip_insonly Trace2
+[start] duel_w2 Trace2
+[done ] irrip_hit0_ins1 Trace2
+[start] duel_w4 Trace2
+[done ] dyn_t0.25 Trace2
+[start] duel_w8 Trace2
+[done ] dyn_t0.40 Trace2
+[start] duel_w16 Trace2
+[done ] dyn_t0.45 Trace2
+[start] lru Trace3
+[done ] dyn_t0.50 Trace2
+[start] rrip Trace3
+[done ] dyn_t0.60 Trace2
+[start] irrip Trace3
+[done ] duel_w1 Trace2
+[start] irrip_insonly Trace3
+[done ] duel_w2 Trace2
+[start] irrip_evictonly Trace3
+[done ] duel_w4 Trace2
+[start] irrip_hit0 Trace3
+[done ] lru Trace3
+[start] irrip_hit0_ins1 Trace3
+[done ] rrip Trace3
+[start] dyn_t0.25 Trace3
+[done ] duel_w8 Trace2
+[start] dyn_t0.40 Trace3
+[done ] duel_w16 Trace2
+[start] dyn_t0.45 Trace3
+[done ] irrip Trace3
+[start] dyn_t0.50 Trace3
+[done ] irrip_insonly Trace3
+[start] dyn_t0.60 Trace3
+[done ] irrip_evictonly Trace3
+[start] duel_w1 Trace3
+[done ] irrip_hit0 Trace3
+[start] duel_w2 Trace3
+[done ] irrip_hit0_ins1 Trace3
+[start] duel_w4 Trace3
+[done ] dyn_t0.25 Trace3
+[start] duel_w8 Trace3
+[done ] dyn_t0.40 Trace3
+[start] duel_w16 Trace3
+[done ] dyn_t0.45 Trace3
+[done ] dyn_t0.50 Trace3
+[done ] dyn_t0.60 Trace3
+[done ] duel_w1 Trace3
+[done ] duel_w2 Trace3
+[done ] duel_w4 Trace3
+[done ] duel_w16 Trace3
+[done ] duel_w8 Trace3
+all Task 2 runs finished, outputs are in results_task2

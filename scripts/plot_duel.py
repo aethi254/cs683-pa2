@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Tables + plots for the set-dueling Dynamic I-RRIP (dyn_duel) runs.
+"""Tables and plots for the set-dueling Dynamic I-RRIP runs (dyn_duel).
 
-Reads results/task2/duel_w<W>_<trace>.txt together with the lru, rrip, irrip and
-dyn_t0.25 runs from Step 5, and writes:
-  results/task2/duel_results.csv / duel_results.md
-  results/task2/plots/duel_*.png
-Speedup is computed against the 'lru' run of the same trace.
+Usage (from the repo root):  python3 scripts/plot_duel.py [results_task2]
+
+Reads results_task2/duel_w<W>_<trace>.txt along with the lru, rrip, irrip and
+dyn_t0.25 runs that run_task2.sh also produces, and writes:
+  results_task2/duel_results.csv    one row per config and trace
+  results_task2/duel_results.md     the same rows, plus a per-config summary
+  results_task2/plots/duel_*.png    comparison and W sensitivity plots
+Speedup is IPC divided by the IPC of the 'lru' run on the same trace.
 """
 import glob
 import os
@@ -18,17 +21,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-RES = sys.argv[1] if len(sys.argv) > 1 else "results/task2"
+RES = sys.argv[1] if len(sys.argv) > 1 else "results_task2"
 OUT = os.path.join(RES, "plots")
 os.makedirs(OUT, exist_ok=True)
-FINAL_W = os.environ.get("DUEL_FINAL", "duel_w8")   # weight shown in the comparison plots
+FINAL_W = os.environ.get("DUEL_FINAL", "duel_w8")   # the W shown in the comparison plots
 
 PATTERNS = {
     "IPC":            r"^CPU 0 cumulative IPC:\s*([\d.]+)",
     "L2C_LOAD_MPKI":  r"^L2C LOAD\s+ACCESS:.*MPKI:\s*([\d.]+)",
     "L2C_INSTR_MPKI": r"^L2C INSTRUCTION LOAD MPKI:\s*([\d.]+)",
     "L2C_DATA_MPKI":  r"^L2C DATA LOAD MPKI:\s*([\d.]+)",
-    # printed only by dyn_duel
+    # only dyn_duel prints these
     "IRRIP_FILL_PCT": r"follower fills in I-RRIP mode:\s*([\d.]+)%",
     "MODE_SWITCHES":  r"DUEL instr weight:.*mode switches:\s*(\d+)",
 }
@@ -45,13 +48,18 @@ for f in sorted(glob.glob(os.path.join(RES, "*.txt"))):
     if not (config.startswith("duel_w") or config in ("lru", "rrip", "irrip", "dyn_t0.25")):
         continue
     text = open(f, errors="ignore").read()
+    if "ChampSim completed all CPUs" not in text:
+        print(f"skipping {f}: the run did not finish")
+        continue
     row = {"config": config, "trace": trace}
     row.update({k: last_match(text, p) for k, p in PATTERNS.items()})
     rows.append(row)
 
 df = pd.DataFrame(rows)
 if df.empty or not df.config.str.startswith("duel_w").any():
-    sys.exit(f"no duel_w*_Trace*.txt files in {RES}")
+    sys.exit(f"no finished duel_w*_Trace*.txt files in {RES}")
+if "lru" not in set(df.config):
+    sys.exit("no lru runs found, so there is no baseline to compute speedup against")
 base = df[df.config == "lru"].set_index("trace")["IPC"]
 df["Speedup"] = df.apply(lambda r: r.IPC / base.get(r.trace, float("nan")), axis=1)
 df = df.sort_values(["trace", "config"])
@@ -67,7 +75,7 @@ def label(c):
     return LABEL.get(c, "Dyn I-RRIP duel (W=" + c[6:] + ")")
 
 
-# summary: geometric-mean speedup and summed MPKI over the traces
+# one summary row per config: geometric-mean speedup and MPKI summed over the traces
 summary = []
 for c in order:
     s = df[df.config == c]
@@ -115,7 +123,7 @@ METRICS = [("IPC", "IPC"), ("L2C_LOAD_MPKI", "L2C Load MPKI"),
            ("L2C_INSTR_MPKI", "L2 Instruction Load MPKI"),
            ("L2C_DATA_MPKI", "L2 Data Load MPKI")]
 
-# final set-dueling policy against everything else
+# the chosen set-dueling weight against the other policies
 cmp_cfg = ["lru", "rrip", "irrip", "dyn_t0.25", FINAL_W]
 bar_plot("Speedup", cmp_cfg, "duel_speedup.png", "Speedup over LRU",
          "Set-dueling Dynamic I-RRIP: speedup over LRU", baseline_line=True)
@@ -128,4 +136,4 @@ for metric, ylabel in [("Speedup", "Speedup over LRU")] + METRICS[1:] + \
     bar_plot(metric, weights, f"duel_sensitivity_{metric}.png", ylabel,
              f"Set-dueling sensitivity to W: {ylabel}", baseline_line=(metric == "Speedup"))
 
-print(f"\nTables: {RES}/duel_results.csv, {RES}/duel_results.md\nPlots : {OUT}/duel_*.png")
+print(f"\nTables: {RES}/duel_results.csv, {RES}/duel_results.md\nPlots:  {OUT}/duel_*.png")
