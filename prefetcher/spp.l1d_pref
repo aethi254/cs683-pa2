@@ -219,7 +219,8 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit
 
 void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t v_evicted_addr, uint64_t evicted_addr, uint32_t metadata_in)
 {
-    uint64_t evictedLine = evicted_addr >> LOG2_BLOCK_SIZE;
+    // operate() sees virtual addresses, so the filter must use the virtual ones here too (addr and evicted_addr are physical)
+    uint64_t evictedLine = v_evicted_addr >> LOG2_BLOCK_SIZE;
     FilterEntry &old = prefetchFilter[evictedLine % FILTER_SIZE];
     if (old.valid && old.tag == (uint8_t)(evictedLine / FILTER_SIZE))
     {
@@ -228,7 +229,7 @@ void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr, uint32_t s
 
     if (prefetch)
     {
-        uint64_t line = addr >> LOG2_BLOCK_SIZE;
+        uint64_t line = v_addr >> LOG2_BLOCK_SIZE;
         prefetchFilter[line % FILTER_SIZE].valid = true;
         prefetchFilter[line % FILTER_SIZE].tag = (uint8_t)(line / FILTER_SIZE);
         issued++;
