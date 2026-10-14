@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.." || exit 1
 WARM=${1:-25000000}
 SIM=${2:-25000000}
 JOBS=${3:-8}
-TRACE_DIR=../Traces     # keep this relative: ChampSim breaks on paths with spaces
+TRACE_DIR=../traces     # keep this relative: ChampSim breaks on paths with spaces
 OUT=results_task2
 TRACES="Trace1 Trace2 Trace3"
 STATIC="lru rrip irrip"
