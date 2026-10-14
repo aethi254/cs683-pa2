@@ -17,15 +17,15 @@ L1I has LRU replacement policy
 L1D has LRU replacement policy
 L2C has Dynamic I-RRIP (set dueling) replacement policy (leaders 32+32, PSEL 10 bits, instr miss weight 8)
 LLC has LRU replacement policy
-Heartbeat CPU 0 instructions: 10000000 cycles: 2974571 heartbeat IPC: 3.36183 cumulative IPC: 3.36183 (Simulation time: 0 hr 0 min 15 sec) 
-Heartbeat CPU 0 instructions: 20000001 cycles: 5829695 heartbeat IPC: 3.50248 cumulative IPC: 3.43071 (Simulation time: 0 hr 0 min 35 sec) 
+Heartbeat CPU 0 instructions: 10000000 cycles: 2974571 heartbeat IPC: 3.36183 cumulative IPC: 3.36183 (Simulation time: 0 hr 0 min 14 sec) 
+Heartbeat CPU 0 instructions: 20000001 cycles: 5829695 heartbeat IPC: 3.50248 cumulative IPC: 3.43071 (Simulation time: 0 hr 0 min 30 sec) 
 
-Warmup complete CPU 0 instructions: 25000002 cycles: 7249257 (Simulation time: 0 hr 0 min 48 sec) 
+Warmup complete CPU 0 instructions: 25000002 cycles: 7249257 (Simulation time: 0 hr 0 min 38 sec) 
 
-Heartbeat CPU 0 instructions: 30000000 cycles: 26479369 heartbeat IPC: 0.484269 cumulative IPC: 0.260009 (Simulation time: 0 hr 1 min 9 sec) 
-Heartbeat CPU 0 instructions: 40000002 cycles: 60059996 heartbeat IPC: 0.297791 cumulative IPC: 0.284033 (Simulation time: 0 hr 1 min 48 sec) 
-Heartbeat CPU 0 instructions: 50000000 cycles: 105014901 heartbeat IPC: 0.222445 cumulative IPC: 0.255714 (Simulation time: 0 hr 2 min 29 sec) 
-Finished CPU 0 instructions: 25000001 cycles: 97765645 cumulative IPC: 0.255714 (Simulation time: 0 hr 2 min 29 sec) 
+Heartbeat CPU 0 instructions: 30000000 cycles: 26479369 heartbeat IPC: 0.484269 cumulative IPC: 0.260009 (Simulation time: 0 hr 0 min 50 sec) 
+Heartbeat CPU 0 instructions: 40000002 cycles: 60059996 heartbeat IPC: 0.297791 cumulative IPC: 0.284033 (Simulation time: 0 hr 1 min 11 sec) 
+Heartbeat CPU 0 instructions: 50000000 cycles: 105014901 heartbeat IPC: 0.222445 cumulative IPC: 0.255714 (Simulation time: 0 hr 1 min 34 sec) 
+Finished CPU 0 instructions: 25000001 cycles: 97765645 cumulative IPC: 0.255714 (Simulation time: 0 hr 1 min 34 sec) 
 
 ChampSim completed all CPUs
 
