@@ -25,7 +25,7 @@
 #define PSEL_BITS               10                          // width of the policy selection counter
 #define PSEL_MAX                ((1<<PSEL_BITS)-1)          // 1023
 #define PSEL_MID                (1<<(PSEL_BITS-1))          // 512, PSEL starts here
-#define DEFAULT_INSTR_WEIGHT    2                           // default cost W of an instruction miss (a data miss costs 1)
+#define DEFAULT_INSTR_WEIGHT    4                           // default cost W of an instruction miss (a data miss costs 1)
 
 // one 2-bit RRPV per line, shared by both policies
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
@@ -71,7 +71,7 @@ static inline bool use_irrip(uint32_t set) {
     return follower_uses_irrip();
 }
 
-// to initialize, we read the instruction-miss weight W from the environment variable IRRIP_INSTR_WEIGHT (default 2) and set all RRPVs to maxRRPV (3)
+// to initialize, we read the instruction-miss weight W from the environment variable IRRIP_INSTR_WEIGHT (default 4) and set all RRPVs to maxRRPV (3)
 void CACHE::l2c_initialize_replacement() {
 
     const char *env=getenv("IRRIP_INSTR_WEIGHT");
