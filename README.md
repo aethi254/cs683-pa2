@@ -2,6 +2,33 @@
 
 ChampSim is a trace-based simulator for microarchitecture research.
 
+## PA2: reproducing our results
+
+All runs use GCC 7 (`g++-7`), 25M warmup + 25M simulated instructions, and the traces in a folder named `traces` next to this repo (`../traces/Trace1.gz`, ...). Keep that folder name: ChampSim derives its random seed, and with it the virtual-to-physical page mapping, from the name of the folder that holds the trace, so `../Traces/` gives slightly different numbers. Each script below builds its binaries, runs all its simulations, and writes tables (`.md`, `.csv`) and plots (`plots/`) into its results folder.
+
+| Task | Code | Command | Results |
+|---|---|---|---|
+| 1A, 1B | `prefetcher/ip_stride.l1d_pref`, `prefetcher/spp.l1d_pref` | `./scripts/task1_all.sh` | `results/` |
+| 2A | `replacement/irrip.l2c_repl` (+ ablation variants `irrip_*.l2c_repl`) | `./scripts/task2_all.sh` | `results_task2/` |
+| 2B | `replacement/dyn_irrip.l2c_repl` (threshold design), `replacement/dyn_duel.l2c_repl` (set-dueling design) | `./scripts/task2_all.sh` | `results_task2/` |
+| 3 | `replacement/dyn_irrip.l2c_repl` in its prefetch-aware mode, with `spp` at the L1D | `./scripts/task3_all.sh` | `results_task3/` |
+
+**Task 3 needs `IRRIP_PF_AWARE=1`.** `dyn_irrip.l2c_repl` contains both Task 2B and Task 3. Without the environment variable it runs as in Task 2B. To run the Task 3 policy by hand:
+
+```bash
+./build_champsim.sh spp dyn_irrip spp_dyn_irrip
+IRRIP_PF_AWARE=1 ./bin/hashed_perceptron-no-spp-no-no-no-no-no-lru-lru-lru-dyn_irrip-lru-lru-lru-lru-1core-spp_dyn_irrip \
+    -warmup_instructions 25000000 -simulation_instructions 25000000 -traces ../traces/Trace1.gz
+```
+
+Other run-time parameters (read from the environment, so one binary covers each sensitivity study):
+
+| Variable | Policy | Default | Meaning |
+|---|---|---|---|
+| `IRRIP_THRESHOLD` | `dyn_irrip` | 0.25 (0.55 with `IRRIP_PF_AWARE=1`) | ratio threshold for choosing I-RRIP |
+| `IRRIP_PF_AWARE` | `dyn_irrip` | 0 | 1 turns on the Task 3 prefetch-aware mode |
+| `IRRIP_INSTR_WEIGHT` | `dyn_duel` | 4 | cost W of an instruction miss in the set duel |
+
 Useful trace links:
 - Traces (access requires an LDAP ID): https://drive.google.com/drive/folders/1zYchkn-M1auZp_l5wRkIzAcDYPkNtW3H?usp=sharing
 - ChampSim wiki: https://champsim.github.io/ChampSim/master/index.html
