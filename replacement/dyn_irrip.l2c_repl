@@ -3,7 +3,7 @@
 
 /*
     Task 2B : Dynamic I-RRIP Replacement Policy (set dueling)
-    Two policies share the same 2-bit RRPV array:
+    Two policies share the same RRPV array (2-bit, or 3-bit in the Task 3 mode below):
     SRRIP  : every line is inserted at RRPV 2, a hit sets RRPV to 0, and the first line with RRPV==3 is evicted.
     I-RRIP : the Task 2A policy.  Instruction lines are inserted at 0 and data lines at 2, an instruction hit sets RRPV to 0 and a data hit to 1, and a data line with RRPV==3 is evicted before an instruction line with RRPV==3.
 
@@ -11,11 +11,18 @@
     Monitoring  : in the leader sets only (writebacks excluded), we count accesses (hits + fills) and misses (fills), for all lines and for instruction lines.  Non-instruction counts are total minus instruction.
     Decision    : every EPOCH_LENGTH leader events we compute ratio = (instr accesses + instr misses) / (total accesses + total misses).  If ratio > threshold, the follower sets use I-RRIP, otherwise SRRIP.  The counters are then halved, so old behaviour fades out gradually.
     Threshold   : DEFAULT_THRESHOLD, or the value of the environment variable IRRIP_THRESHOLD, so one binary is enough for the sensitivity study.
+
+    Task 3 : prefetch-aware mode, turned on with the environment variable IRRIP_PF_AWARE=1 (used together with the SPP prefetcher at the L1D).
+    Without it the policy behaves exactly as in Task 2B, so the Task 2B results stay reproducible.  In this mode:
+    - Prefetched lines (packet type PREFETCH) are inserted at the most distant RRPV, and a prefetch request that hits does not promote the line.
+      SPP fills most of its prefetches into the L1D as well, so the L2 copy is rarely read again (about 7% of SPP's L2 prefetches are used).
+    - Written-back lines (packet type WRITEBACK) are handled the same way.  A writeback is the L1D getting rid of a line, not a sign of reuse.
+    - The RRPV is 3 bits wide instead of 2 (0..7, data inserted at 6).  With prefetched and written-back lines parked at 7, the extra levels
+      let demand data lines age more gradually, which is closer to LRU on the traces where LRU does well.
+    - The default threshold is 0.55 instead of 0.25.
 */
 
-#define maxRRPV             3   
 #define INSTR_INSERT_RRPV   0   // for instruction fills, we set RRPV to 0 to give them a higher priority than data lines
-#define DATA_INSERT_RRPV    2   // for data fills we keep the SRRIP insertion RRPV of 2
 #define INSTR_HIT_RRPV      0   // for instruction hits in I-RRIP, we set RRPV to 0 to give them a higher priority than data lines
 #define DATA_HIT_RRPV       1   // for data hits we set RRPV to 1, so a reused data line is lower than an instruction line of the same age
 
@@ -24,7 +31,14 @@
 #define EPOCH_LENGTH        1024  // number of leader-set events (hits + fills) between two decisions
 #define DEFAULT_THRESHOLD   0.25  // default threshold for dynamic policy selection
 
-// one 2-bit RRPV per line, shared by both policies
+#define PF_AWARE_THRESHOLD 0.55  // threshold for dynamic policy selection in prefetch-aware mode
+
+// task 3 : prefetch aware mode
+bool pf_aware=false;
+uint32_t maxRRPV=3;  // maximum RRPV value (2 bits) for task 2B, 7 (3 bits) for task 3
+uint32_t data_insert_rrpv=2;  // insertion RRPV for data lines (2 bits) for task 2B, 6 (3 bits) for task 3
+
+// one RRPV per line (2-bit, or 3-bit in prefetch-aware mode), shared by both policies
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
 
 // leader set information for dynamic policy selection
@@ -79,15 +93,22 @@ static void end_epoch() {
     ld_events=0;
 }
 
-// to initialize, we read the threshold from the environment variable IRRIP_THRESHOLD (default 0.25) and set all RRPVs to maxRRPV (3)
+// to initialize, we read IRRIP_PF_AWARE and the threshold from the environment (IRRIP_THRESHOLD, default 0.25, or 0.55 in prefetch-aware mode) and set all RRPVs to maxRRPV
 void CACHE::l2c_initialize_replacement() {
-    const char *env=getenv("IRRIP_THRESHOLD");
 
-    if(env) irrip_threshold = atof(env);
+    const char *pf_env=getenv("IRRIP_PF_AWARE");
+    if(pf_env && atoi(pf_env)) {
+        pf_aware=true;
+        maxRRPV=7;
+        data_insert_rrpv=maxRRPV-1;
+        irrip_threshold=PF_AWARE_THRESHOLD;
+    }
+    const char *env=getenv("IRRIP_THRESHOLD");
+    if(env) irrip_threshold=atof(env);
 
     cout<< NAME <<" has Dynamic I-RRIP replacement policy"
         << " (leaders " << NUM_LEADER_SETS << ", epoch " << EPOCH_LENGTH
-        << ", threshold " << irrip_threshold << ")" << endl;
+        << ", threshold " << irrip_threshold << ", prefetch-aware " << pf_aware << ")" << endl;
 
     for(int i=0;i<L2C_SET;i++) 
         for(int j=0;j<L2C_WAY;j++) 
@@ -95,13 +116,13 @@ void CACHE::l2c_initialize_replacement() {
 
 }
 
-// to find a victim, we first look for an invalid line.  If there is none, we look for a line with RRPV==maxRRPV (3), preferring a data line in I-RRIP mode.  If there is no such line, we increment all RRPVs and repeat until we find a victim.
+// to find a victim, we first look for an invalid line.  If there is none, we look for a line with RRPV==maxRRPV (3, or 7 in prefetch-aware mode), preferring a data line in I-RRIP mode.  If there is no such line, we increment all RRPVs and repeat until we find a victim.
 uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type) {
     for(int i=0; i<L2C_WAY; i++) if (!current_set[i].valid) return i;
 
     bool irrip = use_irrip(set);
 
-    // in I-RRIP mode we first look for a data line with RRPV==maxRRPV (3); in SRRIP mode we skip this step
+    // in I-RRIP mode we first look for a data line with RRPV==maxRRPV (3, or 7 in prefetch-aware mode); in SRRIP mode we skip this step
     while(1) {
         if(irrip) {
             for (int i=0; i<L2C_WAY; i++)
@@ -109,7 +130,7 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
                     return i;
         }   
             
-        // otherwise (or in SRRIP mode) we evict the first line with RRPV==maxRRPV (3)
+        // otherwise (or in SRRIP mode) we evict the first line with RRPV==maxRRPV (3, or 7 in prefetch-aware mode)
         for (int i=0; i<L2C_WAY; i++)
             if (l2_rrpv[set][i] == maxRRPV)
                 return i;
@@ -144,17 +165,26 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
 
     // promotion: SRRIP sends every hit to 0, I-RRIP sends data hits only to 1
     if(hit) {
+        // Task 3: a prefetch request or a writeback that hits says nothing about the core reusing the line, so the RRPV stays as it is
+        if(pf_aware && (type==PREFETCH || type==WRITEBACK)) return;
+
         if (use_irrip(set) && !instr) l2_rrpv[set][way] = DATA_HIT_RRPV;
         else l2_rrpv[set][way] = INSTR_HIT_RRPV;
         return;
     }
 
-    // insertion: in I-RRIP mode instruction fills go to 0, everything else goes to 2 (the SRRIP insertion)
+    // Task 3: prefetched and written-back lines go to maxRRPV, so they are the first candidates for eviction
+    if(pf_aware && (type==PREFETCH || type==WRITEBACK)) {
+        l2_rrpv[set][way] = maxRRPV;
+        return;
+    }
+
+    // insertion: in I-RRIP mode instruction fills go to 0, everything else goes to maxRRPV-1 (the SRRIP insertion)
     if(use_irrip(set) && instr) {
         l2_rrpv[set][way] = INSTR_INSERT_RRPV;
     } 
     else {
-        l2_rrpv[set][way] = DATA_INSERT_RRPV;
+        l2_rrpv[set][way] = data_insert_rrpv;
     }
 }
 
