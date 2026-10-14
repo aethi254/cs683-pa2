@@ -24,7 +24,7 @@ import pandas as pd
 RES = sys.argv[1] if len(sys.argv) > 1 else "results_task2"
 OUT = os.path.join(RES, "plots")
 os.makedirs(OUT, exist_ok=True)
-FINAL_W = os.environ.get("DUEL_FINAL", "duel_w8")   # the W shown in the comparison plots
+FINAL_W = os.environ.get("DUEL_FINAL", "duel_w4")   # the W shown in the comparison plots
 
 PATTERNS = {
     "IPC":            r"^CPU 0 cumulative IPC:\s*([\d.]+)",
